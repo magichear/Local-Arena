@@ -514,7 +514,7 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
 
     private bool TryApplyStickers(ushort defIndex, CEconItemView item, KnifePreset preset)
     {
-        // Keep the preview framework compiled, but never enter its native-write path in 1.4.2.6.
+        // Keep the preview framework compiled, but never enter its native-write path in 1.4.3.1.
         if (!StickerReleaseEnabled) return true;
 
         if (!StickerAttributePlanner.TryBuild(
