@@ -1,12 +1,15 @@
 {
-  "schema_version": 3,
+  "schema_version": 5,
   "enabled": false,
   "apply_to_human_players": true,
   "apply_on_pickup": true,
   "music_kit_id": 0,
   "stickers_enabled": false,
+  "charms_enabled": false,
+  "agents_enabled": false,
   "loadouts": {
     "ct": {
+      "agent_model": "",
       "default_knife_defindex": 515,
       "knife_presets": {
         "515": {
@@ -24,6 +27,7 @@
       "gun_presets": {}
     },
     "t": {
+      "agent_model": "",
       "default_knife_defindex": 515,
       "knife_presets": {
         "515": {

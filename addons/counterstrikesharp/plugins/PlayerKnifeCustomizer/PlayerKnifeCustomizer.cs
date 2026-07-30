@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 namespace PlayerKnifeCustomizer;
 
 public readonly record struct StickerAttribute(string Name, float Value);
+public readonly record struct CharmNativePlacement(uint PlacementId, float X, float Y, float Z);
 
 public static class StickerFailurePolicy
 {
@@ -30,7 +31,7 @@ public static class StickerAttributePlanner
         bool enabled,
         IEnumerable<StickerPreset>? stickers,
         IReadOnlySet<uint> validIds,
-        IReadOnlySet<ushort> validWeaponIds,
+        IReadOnlyDictionary<ushort, uint> schemaCounts,
         out List<StickerAttribute> attributes,
         out string error)
     {
@@ -42,7 +43,7 @@ public static class StickerAttributePlanner
             return Fail("knife stickers are not supported", out error);
         if (ordered.Length > 5)
             return Fail("a weapon cannot have more than five stickers", out error);
-        if (!validWeaponIds.Contains(defIndex))
+        if (!schemaCounts.TryGetValue(defIndex, out uint schemaCount) || schemaCount == 0)
             return Fail("stickers are not supported for this weapon", out error);
         if (!enabled) return true;
 
@@ -53,6 +54,8 @@ public static class StickerAttributePlanner
                 return Fail("sticker slots must be unique and between 0 and 4", out error);
             if (sticker.Id == 0 || !validIds.Contains(sticker.Id))
                 return Fail("unknown sticker id", out error);
+            if (sticker.Schema >= schemaCount)
+                return Fail("sticker schema is not supported for this weapon", out error);
             if (!float.IsFinite(sticker.Wear) || sticker.Wear is < 0f or > 1f ||
                 !float.IsFinite(sticker.Scale) || sticker.Scale is < 0.1f or > 2f ||
                 !float.IsFinite(sticker.Rotation) || sticker.Rotation is < 0f or > 360f ||
@@ -62,9 +65,9 @@ public static class StickerAttributePlanner
 
             string prefix = $"sticker slot {sticker.Slot}";
             attributes.Add(new StickerAttribute($"{prefix} id", EncodeUInt32(sticker.Id)));
+            attributes.Add(new StickerAttribute($"{prefix} schema", EncodeUInt32(sticker.Schema)));
             if (sticker.CustomPosition)
             {
-                attributes.Add(new StickerAttribute($"{prefix} schema", 0f));
                 attributes.Add(new StickerAttribute($"{prefix} offset x", sticker.OffsetX));
                 attributes.Add(new StickerAttribute($"{prefix} offset y", sticker.OffsetY));
             }
@@ -82,12 +85,101 @@ public static class StickerAttributePlanner
     }
 }
 
+public static class CharmAttributePlanner
+{
+    public static bool TryBuild(
+        ushort defIndex,
+        bool enabled,
+        CharmPreset? charm,
+        IReadOnlySet<uint> validIds,
+        IReadOnlyDictionary<ushort, IReadOnlyDictionary<uint, CharmNativePlacement>> placements,
+        out List<StickerAttribute> attributes,
+        out string error)
+    {
+        attributes = new List<StickerAttribute>();
+        error = string.Empty;
+        if (charm == null) return true;
+        if (defIndex is >= 500 and <= 526)
+            return Fail("knife charms are not supported", out error);
+        if (!placements.TryGetValue(defIndex, out var weaponPlacements))
+            return Fail("charms are not supported for this weapon", out error);
+        if (!enabled) return true;
+        if (charm.Id == 0 || !validIds.Contains(charm.Id))
+            return Fail("unknown charm id", out error);
+        if (charm.Seed < 0)
+            return Fail("charm seed is outside the supported range", out error);
+        if (!weaponPlacements.TryGetValue(charm.PlacementId, out var placement))
+            return Fail("charm placement is not supported for this weapon", out error);
+        if (!float.IsFinite(placement.X) || !float.IsFinite(placement.Y) || !float.IsFinite(placement.Z))
+            return Fail("charm placement contains non-finite coordinates", out error);
+
+        const string prefix = "keychain slot 0";
+        attributes.Add(new StickerAttribute($"{prefix} id", StickerAttributePlanner.EncodeUInt32(charm.Id)));
+        attributes.Add(new StickerAttribute($"{prefix} seed", BitConverter.Int32BitsToSingle(charm.Seed)));
+        attributes.Add(new StickerAttribute($"{prefix} offset x", placement.X));
+        attributes.Add(new StickerAttribute($"{prefix} offset y", placement.Y));
+        attributes.Add(new StickerAttribute($"{prefix} offset z", placement.Z));
+        return true;
+
+        static bool Fail(string message, out string target)
+        {
+            target = message;
+            return false;
+        }
+    }
+}
+
+public static class DecorationConfigPolicy
+{
+    public static bool CanPreserveStickers(
+        ushort defIndex,
+        bool allowDecorations,
+        IReadOnlyCollection<StickerPreset> stickers,
+        IReadOnlySet<uint> validIds,
+        IReadOnlyDictionary<ushort, uint> schemaCounts)
+    {
+        if (!allowDecorations) return stickers.Count == 0;
+        IReadOnlySet<uint> validationIds = validIds.Count > 0
+            ? validIds
+            : stickers.Where(sticker => sticker.Id > 0).Select(sticker => sticker.Id).ToHashSet();
+        IReadOnlyDictionary<ushort, uint> validationSchemas = schemaCounts.Count > 0
+            ? schemaCounts
+            : new Dictionary<ushort, uint> { [defIndex] = 64 };
+        return StickerAttributePlanner.TryBuild(
+            defIndex, true, stickers, validationIds, validationSchemas, out _, out _);
+    }
+
+    public static bool CanPreserveCharm(
+        ushort defIndex,
+        bool allowDecorations,
+        CharmPreset? charm,
+        IReadOnlySet<uint> validIds,
+        IReadOnlyDictionary<ushort, IReadOnlyDictionary<uint, CharmNativePlacement>> placements)
+    {
+        if (!allowDecorations || charm == null) return false;
+        if (validIds.Count == 0 || placements.Count == 0)
+            return charm.Id > 0 && charm.Seed >= 0;
+        return CharmAttributePlanner.TryBuild(
+            defIndex, true, charm, validIds, placements, out _, out _);
+    }
+}
+
+public static class AgentModelPolicy
+{
+    public static bool IsAllowed(
+        CosmeticTeam team,
+        string? model,
+        IReadOnlyDictionary<CosmeticTeam, HashSet<string>> validModels) =>
+        string.IsNullOrEmpty(model) ||
+        validModels.TryGetValue(team, out var teamModels) && teamModels.Contains(model);
+}
+
 public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
 {
-    private static readonly bool StickerReleaseEnabled = false;
+    private static readonly bool DecorationReleaseEnabled = true;
 
     public override string ModuleName => "PlayerCosmetics";
-    public override string ModuleVersion => "0.4.1";
+    public override string ModuleVersion => "0.5.0";
     public override string ModuleAuthor => "CS2BotImproverPlus contributors";
     public override string ModuleDescription => "Applies Panel-defined player cosmetic presets";
 
@@ -100,7 +192,10 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
 
     private readonly Dictionary<ushort, HashSet<int>> _validPaints = new();
     private readonly HashSet<uint> _validStickers = new();
-    private readonly HashSet<ushort> _validStickerWeapons = new();
+    private readonly Dictionary<ushort, uint> _stickerSchemaCounts = new();
+    private readonly HashSet<uint> _validCharms = new();
+    private readonly Dictionary<ushort, IReadOnlyDictionary<uint, CharmNativePlacement>> _charmPlacements = new();
+    private readonly Dictionary<CosmeticTeam, HashSet<string>> _agentModels = new();
     private readonly Dictionary<ushort, List<WeaponSkinEntry>> _skinCatalog = new();
     private readonly HashSet<(ushort DefIndex, int Paint)> _legacyPaints = new();
     private KnifeConfig _config = new();
@@ -116,13 +211,13 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
     private string GunConfigPath => Path.Combine(ModuleDirectory, "player_gun_presets.json");
     private string CatalogPath => Path.Combine(ModuleDirectory, "weapon_skins.json");
     private string StickerCatalogPath => Path.Combine(ModuleDirectory, "sticker_ids.json");
-    private string StickerWeaponCatalogPath => Path.Combine(ModuleDirectory, "sticker_weapon_ids.json");
+    private string PlayerCosmeticCatalogPath => Path.Combine(ModuleDirectory, "player_cosmetic_catalog.json");
 
     public override void Load(bool hotReload)
     {
         LoadCatalog();
         LoadStickerCatalog();
-        LoadStickerWeaponCatalog();
+        LoadPlayerCosmeticCatalog();
         LoadConfig();
 
         AddCommand("css_cs2bi_knives_reload", "Reload player knife presets", OnReloadCommand);
@@ -148,7 +243,7 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
         RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam);
         RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
         RegisterEventHandler<EventRoundEnd>(OnRoundEnd);
-        RegisterListener<Listeners.OnMapStart>(_ => _applyTracker.CancelAll());
+        RegisterListener<Listeners.OnMapStart>(OnMapStart);
         RegisterListener<Listeners.OnMapEnd>(() => _applyTracker.CancelAll());
         VirtualFunctions.GiveNamedItemFunc.Hook(OnGiveNamedItemPost, HookMode.Post);
         Logger.LogInformation("[PlayerKnifeCustomizer] Loaded generation-safe pipeline; enabled={Enabled}, signature={Signature}, catalog={Catalog}",
@@ -159,6 +254,21 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
     {
         _applyTracker.CancelAll();
         VirtualFunctions.GiveNamedItemFunc.Unhook(OnGiveNamedItemPost, HookMode.Post);
+    }
+
+    private void OnMapStart(string _)
+    {
+        _applyTracker.CancelAll();
+        if (!_config.Enabled || !_config.AgentsEnabled) return;
+        int failures = 0;
+        string lastError = string.Empty;
+        foreach (string model in _agentModels.Values.SelectMany(models => models))
+        {
+            try { Server.PrecacheModel(model); }
+            catch (Exception ex) { failures++; lastError = ex.Message; }
+        }
+        if (failures > 0)
+            LogApplyError("agent precache", new InvalidOperationException($"{failures} models failed; last error: {lastError}"));
     }
 
     private HookResult OnGiveNamedItemPost(DynamicHook hook)
@@ -323,6 +433,8 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
         if (!_applyTracker.TryBindContext(playerHandle, generation, readyPawn.Handle, (int)readyTeam))
             return;
 
+        TryApplyPhase(playerHandle, generation, CosmeticApplyPhase.Agent,
+            () => TryApplyAgent(readyPawn, readyTeam), "agent pipeline");
         TryApplyPhase(playerHandle, generation, CosmeticApplyPhase.Knife,
             () => TryApplyDefaultKnife(readyPawn, readyTeam), "knife pipeline");
         TryApplyPhase(playerHandle, generation, CosmeticApplyPhase.Gloves,
@@ -349,6 +461,22 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
         {
             LogApplyError(operation, ex);
         }
+    }
+
+    private bool TryApplyAgent(CCSPlayerPawn pawn, CosmeticTeam team)
+    {
+        if (!_config.AgentsEnabled) return true;
+        string model = _config.Loadouts.For(team).AgentModel;
+        if (string.IsNullOrEmpty(model)) return true;
+        if (!AgentModelPolicy.IsAllowed(team, model, _agentModels))
+        {
+            LogApplyError($"agent for {team}", new InvalidDataException("Agent model is unavailable in the local catalog"));
+            return true;
+        }
+        if (!pawn.IsValid) return false;
+        pawn.SetModel(model);
+        Utilities.SetStateChanged(pawn, "CBaseModelEntity", "m_clrRender");
+        return true;
     }
 
     private bool TryApplyDefaultKnife(CCSPlayerPawn pawn, CosmeticTeam team)
@@ -398,11 +526,11 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
 
     private void TryControlledReequip(CCSPlayerController player, CCSPlayerPawn pawn, CosmeticTeam team, long generation)
     {
-        if (!StickerReleaseEnabled || !_config.StickersEnabled) return;
+        if (!DecorationReleaseEnabled || (!_config.StickersEnabled && !_config.CharmsEnabled)) return;
         var active = pawn.WeaponServices?.ActiveWeapon.Value;
         if (active == null || !active.IsValid || IsKnifeName(active.DesignerName)) return;
         ushort defIndex = active.AttributeManager?.Item?.ItemDefinitionIndex ?? 0;
-        if (!TryGetPreset(defIndex, team, out var preset) || (preset.Stickers?.Count ?? 0) == 0) return;
+        if (!TryGetPreset(defIndex, team, out var preset) || ((preset.Stickers?.Count ?? 0) == 0 && preset.Charm == null)) return;
         if (!_applyTracker.TryMarkReequip(player.Handle, generation)) return;
 
         player.ExecuteClientCommand("lastinv");
@@ -445,8 +573,8 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
             SetTextureAttributes(item.NetworkedDynamicAttributes.Handle, preset);
             SetTextureAttributes(item.AttributeList.Handle, preset);
             if (preset.StatTrakEnabled && !preset.SouvenirEnabled) ApplyStatTrak(weapon, preset);
-            if (StickerReleaseEnabled &&
-                StickerFailurePolicy.ShouldRestoreBaseSkin(TryApplyStickers(defIndex, item, preset)))
+            if (DecorationReleaseEnabled &&
+                StickerFailurePolicy.ShouldRestoreBaseSkin(TryApplyDecorations(defIndex, item, preset)))
                 RestoreBaseAttributes(weapon, item, preset);
 
             Utilities.SetStateChanged(weapon, "CEconEntity", "m_AttributeManager");
@@ -512,17 +640,25 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
         _setAttrByName.Invoke(handle, "set item texture wear", wear);
     }
 
-    private bool TryApplyStickers(ushort defIndex, CEconItemView item, KnifePreset preset)
+    private bool TryApplyDecorations(ushort defIndex, CEconItemView item, KnifePreset preset)
     {
-        // Keep the preview framework compiled, but never enter its native-write path in 1.4.3.1.
-        if (!StickerReleaseEnabled) return true;
-
-        if (!StickerAttributePlanner.TryBuild(
-                defIndex, _config.StickersEnabled, preset.Stickers, _validStickers, _validStickerWeapons,
-                out var attributes, out string error))
+        if (!DecorationReleaseEnabled) return true;
+        var attributes = new List<StickerAttribute>();
+        if (StickerAttributePlanner.TryBuild(
+                defIndex, _config.StickersEnabled, preset.Stickers, _validStickers, _stickerSchemaCounts,
+                out var stickerAttributes, out string stickerError))
+            attributes.AddRange(stickerAttributes);
+        else
         {
-            LogApplyError($"stickers for defindex {defIndex}", new InvalidDataException(error));
-            return false;
+            LogApplyError($"stickers for defindex {defIndex}", new InvalidDataException(stickerError));
+        }
+        if (CharmAttributePlanner.TryBuild(
+                defIndex, _config.CharmsEnabled, preset.Charm, _validCharms, _charmPlacements,
+                out var charmAttributes, out string charmError))
+            attributes.AddRange(charmAttributes);
+        else
+        {
+            LogApplyError($"charm for defindex {defIndex}", new InvalidDataException(charmError));
         }
         if (attributes.Count == 0) return true;
 
@@ -535,7 +671,7 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
         }
         catch (Exception ex)
         {
-            LogApplyError($"stickers for defindex {defIndex}", ex);
+            LogApplyError($"decorations for defindex {defIndex}", ex);
             return false;
         }
     }
@@ -665,8 +801,8 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
                     ? schema.GetInt32() : 1;
                 if (_loadedConfigSchema is < 1 or > KnifeConfig.CurrentSchemaVersion)
                     throw new InvalidDataException($"Unsupported cosmetics schema {_loadedConfigSchema}");
-                bool isTeamSchema = _loadedConfigSchema is 2 or 3 && document.RootElement.TryGetProperty("loadouts", out _);
-                if (_loadedConfigSchema is 2 or 3 && !isTeamSchema)
+                bool isTeamSchema = _loadedConfigSchema is 2 or 3 or 4 or 5 && document.RootElement.TryGetProperty("loadouts", out _);
+                if (_loadedConfigSchema is 2 or 3 or 4 or 5 && !isTeamSchema)
                     throw new InvalidDataException($"Cosmetics schema {_loadedConfigSchema} has no team loadouts");
                 text = SanitizeConfigStickerFields(text, gunFile: false, out stickersSanitized);
                 if (isTeamSchema)
@@ -679,9 +815,11 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
             }
             LoadGunConfig();
             _config.Normalize();
+            bool agentsSanitized = SanitizeAgentModels();
             _applyErrorThrottle.Reset();
             if (_loadedConfigSchema < KnifeConfig.CurrentSchemaVersion ||
-                _loadedGunConfigSchema < KnifeConfig.CurrentSchemaVersion || stickersSanitized || _stickersSanitizedDuringLoad)
+                _loadedGunConfigSchema < KnifeConfig.CurrentSchemaVersion || stickersSanitized ||
+                _stickersSanitizedDuringLoad || agentsSanitized)
                 SaveConfig();
         }
         catch (Exception ex)
@@ -716,7 +854,7 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
             if (_loadedGunConfigSchema is < 1 or > KnifeConfig.CurrentSchemaVersion)
                 throw new InvalidDataException($"Unsupported gun cosmetics schema {_loadedGunConfigSchema}");
             text = SanitizeConfigStickerFields(text, gunFile: true, out bool stickersSanitized);
-            if (_loadedGunConfigSchema is 2 or 3)
+            if (_loadedGunConfigSchema is 2 or 3 or 4 or 5)
             {
                 var guns = JsonSerializer.Deserialize<TeamGunConfig>(text, JsonOptions) ?? new TeamGunConfig();
                 _config.Loadouts.Ct.GunPresets = guns.Ct ?? new Dictionary<ushort, KnifePreset>();
@@ -749,56 +887,84 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
         changed = false;
         if (gunFile)
         {
-            if (_loadedGunConfigSchema is 2 or 3)
+            if (_loadedGunConfigSchema is 2 or 3 or 4 or 5)
             {
-                changed |= SanitizePresetMap(root["ct"], allowStickers: true);
-                changed |= SanitizePresetMap(root["t"], allowStickers: true);
+                changed |= SanitizePresetMap(root["ct"], allowDecorations: true, _loadedGunConfigSchema < 4);
+                changed |= SanitizePresetMap(root["t"], allowDecorations: true, _loadedGunConfigSchema < 4);
             }
             else
-                changed |= SanitizePresetMap(root, allowStickers: true);
+                changed |= SanitizePresetMap(root, allowDecorations: true, migrateSchema: true);
         }
         else
         {
-            changed |= SanitizePresetMap(root["presets"], allowStickers: false);
-            changed |= SanitizePresetMap(root["gun_presets"], allowStickers: true);
+            changed |= SanitizePresetMap(root["presets"], allowDecorations: false, _loadedConfigSchema < 4);
+            changed |= SanitizePresetMap(root["gun_presets"], allowDecorations: true, _loadedConfigSchema < 4);
             foreach (string side in new[] { "ct", "t" })
             {
                 JsonNode? loadout = root["loadouts"]?[side];
-                changed |= SanitizePresetMap(loadout?["knife_presets"], allowStickers: false);
-                changed |= SanitizePresetMap(loadout?["gun_presets"], allowStickers: true);
+                changed |= SanitizePresetMap(loadout?["knife_presets"], allowDecorations: false, _loadedConfigSchema < 4);
+                changed |= SanitizePresetMap(loadout?["gun_presets"], allowDecorations: true, _loadedConfigSchema < 4);
             }
         }
         return root.ToJsonString(JsonOptions);
     }
 
-    private bool SanitizePresetMap(JsonNode? node, bool allowStickers)
+    private bool SanitizePresetMap(JsonNode? node, bool allowDecorations, bool migrateSchema)
     {
         if (node is not JsonObject presets) return false;
         bool changed = false;
         foreach (var (key, value) in presets.ToArray())
         {
-            if (value is not JsonObject preset || !preset.TryGetPropertyValue("stickers", out JsonNode? stickerNode))
-                continue;
-            bool valid = false;
-            if (allowStickers && ushort.TryParse(key, out ushort defIndex) && stickerNode is JsonArray)
+            if (value is not JsonObject preset || !ushort.TryParse(key, out ushort defIndex)) continue;
+            if (preset.TryGetPropertyValue("stickers", out JsonNode? stickerNode))
             {
+                bool valid = false;
                 try
                 {
+                    if (allowDecorations && migrateSchema && stickerNode is JsonArray legacyStickers
+                        && _stickerSchemaCounts.TryGetValue(defIndex, out uint schemaCount))
+                    {
+                        foreach (JsonNode? nodeEntry in legacyStickers)
+                        {
+                            if (nodeEntry is not JsonObject sticker || sticker.ContainsKey("schema")) continue;
+                            uint slot = sticker["slot"]?.GetValue<uint>() ?? 0;
+                            sticker["schema"] = Math.Min(slot, schemaCount - 1);
+                            changed = true;
+                        }
+                    }
                     var stickers = stickerNode.Deserialize<List<StickerPreset>>(JsonOptions) ?? new List<StickerPreset>();
-                    valid = StickerAttributePlanner.TryBuild(
-                        defIndex, true, stickers, _validStickers, _validStickerWeapons, out _, out _);
+                    valid = DecorationConfigPolicy.CanPreserveStickers(
+                        defIndex, allowDecorations, stickers, _validStickers, _stickerSchemaCounts);
+                }
+                catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+                {
+                    valid = false;
+                }
+                if (!valid)
+                {
+                    preset["stickers"] = new JsonArray();
+                    changed = true;
+                }
+            }
+            if (preset.TryGetPropertyValue("charm", out JsonNode? charmNode) && charmNode != null)
+            {
+                bool valid;
+                try
+                {
+                    var charm = charmNode.Deserialize<CharmPreset>(JsonOptions);
+                    valid = DecorationConfigPolicy.CanPreserveCharm(
+                        defIndex, allowDecorations, charm, _validCharms, _charmPlacements);
                 }
                 catch (JsonException)
                 {
                     valid = false;
                 }
+                if (!valid)
+                {
+                    preset["charm"] = null;
+                    changed = true;
+                }
             }
-            else if (!allowStickers && stickerNode is JsonArray array && array.Count == 0)
-                valid = true;
-
-            if (valid) continue;
-            preset["stickers"] = new JsonArray();
-            changed = true;
         }
         return changed;
     }
@@ -887,26 +1053,103 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
         }
     }
 
-    private void LoadStickerWeaponCatalog()
+    private void LoadPlayerCosmeticCatalog()
     {
-        _validStickerWeapons.Clear();
-        if (!File.Exists(StickerWeaponCatalogPath)) return;
+        _stickerSchemaCounts.Clear();
+        _validCharms.Clear();
+        _charmPlacements.Clear();
+        _agentModels.Clear();
+        if (!File.Exists(PlayerCosmeticCatalogPath)) return;
         try
         {
-            using var document = JsonDocument.Parse(File.ReadAllText(StickerWeaponCatalogPath));
-            foreach (var entry in document.RootElement.EnumerateArray())
+            using var document = JsonDocument.Parse(File.ReadAllText(PlayerCosmeticCatalogPath));
+            var root = document.RootElement;
+            if (root.GetProperty("schema_version").GetInt32() != 1)
+                throw new InvalidDataException("Unsupported player cosmetic catalog schema");
+            var schemaCounts = new Dictionary<ushort, uint>();
+            var validCharms = new HashSet<uint>();
+            var charmPlacements = new Dictionary<ushort, IReadOnlyDictionary<uint, CharmNativePlacement>>();
+            var agentModels = new Dictionary<CosmeticTeam, HashSet<string>>
             {
-                if (!entry.TryGetProperty("id", out var idElement)) continue;
-                ushort id = idElement.ValueKind == JsonValueKind.Number
-                    ? idElement.GetUInt16()
-                    : ushort.TryParse(idElement.GetString(), out ushort value) ? value : (ushort)0;
-                if (id > 0) _validStickerWeapons.Add(id);
+                [CosmeticTeam.Ct] = new(StringComparer.OrdinalIgnoreCase),
+                [CosmeticTeam.T] = new(StringComparer.OrdinalIgnoreCase),
+            };
+            foreach (var idElement in root.GetProperty("charm_ids").EnumerateArray())
+            {
+                uint id = idElement.GetUInt32();
+                if (id == 0 || !validCharms.Add(id))
+                    throw new InvalidDataException("Player cosmetic catalog contains an invalid charm id");
             }
+            var agentRoot = root.GetProperty("agent_models");
+            foreach (var (team, key, prefix) in new[]
+            {
+                (CosmeticTeam.Ct, "ct", "agents\\models\\ctm_"),
+                (CosmeticTeam.T, "t", "agents\\models\\tm_"),
+            })
+            {
+                foreach (var modelElement in agentRoot.GetProperty(key).EnumerateArray())
+                {
+                    string model = modelElement.GetString() ?? string.Empty;
+                    if (!model.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                        !model.EndsWith(".vmdl", StringComparison.OrdinalIgnoreCase) ||
+                        model.Contains("..", StringComparison.Ordinal) ||
+                        model.Contains('/') ||
+                        !agentModels[team].Add(model))
+                        throw new InvalidDataException("Player cosmetic catalog contains an invalid agent model");
+                }
+                if (agentModels[team].Count == 0)
+                    throw new InvalidDataException("Player cosmetic catalog contains no agent models for a team");
+            }
+            foreach (var weapon in root.GetProperty("weapons").EnumerateObject())
+            {
+                if (!ushort.TryParse(weapon.Name, out ushort defIndex) || defIndex == 0)
+                    throw new InvalidDataException("Player cosmetic catalog contains an invalid weapon id");
+                uint schemaCount = weapon.Value.GetProperty("sticker_schema_count").GetUInt32();
+                if (schemaCount == 0 || !schemaCounts.TryAdd(defIndex, schemaCount))
+                    throw new InvalidDataException("Player cosmetic catalog contains an invalid sticker schema count");
+                var placements = new Dictionary<uint, CharmNativePlacement>();
+                foreach (var entry in weapon.Value.GetProperty("charm_positions").EnumerateArray())
+                {
+                    uint placementId = entry.GetProperty("placement_id").GetUInt32();
+                    float x = entry.GetProperty("x").GetSingle();
+                    float y = entry.GetProperty("y").GetSingle();
+                    float z = entry.GetProperty("z").GetSingle();
+                    if (!float.IsFinite(x) || !float.IsFinite(y) || !float.IsFinite(z)
+                        || !placements.TryAdd(placementId, new CharmNativePlacement(placementId, x, y, z)))
+                        throw new InvalidDataException("Player cosmetic catalog contains an invalid charm placement");
+                }
+                if (placements.Count > 0) charmPlacements.Add(defIndex, placements);
+            }
+            foreach (var pair in schemaCounts) _stickerSchemaCounts.Add(pair.Key, pair.Value);
+            foreach (uint id in validCharms) _validCharms.Add(id);
+            foreach (var pair in charmPlacements) _charmPlacements.Add(pair.Key, pair.Value);
+            foreach (var pair in agentModels) _agentModels.Add(pair.Key, pair.Value);
         }
         catch (Exception ex)
         {
-            Logger.LogError("[PlayerKnifeCustomizer] Sticker weapon catalog load failed: {Message}", ex.Message);
+            _stickerSchemaCounts.Clear();
+            _validCharms.Clear();
+            _charmPlacements.Clear();
+            _agentModels.Clear();
+            Logger.LogError("[PlayerKnifeCustomizer] Player cosmetic catalog load failed: {Message}", ex.Message);
         }
+    }
+
+    private bool SanitizeAgentModels()
+    {
+        if (_agentModels.Count == 0) return false;
+        bool changed = false;
+        foreach (var (team, loadout) in new[]
+        {
+            (CosmeticTeam.Ct, _config.Loadouts.Ct),
+            (CosmeticTeam.T, _config.Loadouts.T),
+        })
+        {
+            if (AgentModelPolicy.IsAllowed(team, loadout.AgentModel, _agentModels)) continue;
+            loadout.AgentModel = string.Empty;
+            changed = true;
+        }
+        return changed;
     }
 
     private WeaponSkinEntry? FindSkin(ushort defIndex, int paint) =>
@@ -918,15 +1161,15 @@ public sealed class PlayerKnifeCustomizerPlugin : BasePlugin
     {
         LoadCatalog();
         LoadStickerCatalog();
-        LoadStickerWeaponCatalog();
+        LoadPlayerCosmeticCatalog();
         LoadConfig();
         string restart = _config.Enabled && _setAttrByName == null ? "; restart CS2 to initialize runtime hooks" : string.Empty;
-        command.ReplyToCommand($"[PlayerKnifeCustomizer] reloaded; enabled={_config.Enabled}, stickers={StickerReleaseEnabled && _config.StickersEnabled}, sticker_catalog={_validStickers.Count}, ct_knives={_config.Loadouts.Ct.KnifePresets.Count}, t_knives={_config.Loadouts.T.KnifePresets.Count}, ct_guns={_config.Loadouts.Ct.GunPresets.Count}, t_guns={_config.Loadouts.T.GunPresets.Count}, music={_config.MusicKitId}{restart}");
+        command.ReplyToCommand($"[PlayerKnifeCustomizer] reloaded; enabled={_config.Enabled}, stickers={DecorationReleaseEnabled && _config.StickersEnabled}, charms={DecorationReleaseEnabled && _config.CharmsEnabled}, agents={DecorationReleaseEnabled && _config.AgentsEnabled}, sticker_catalog={_validStickers.Count}, charm_catalog={_validCharms.Count}, agent_catalog={_agentModels.Values.Sum(models => models.Count)}, ct_knives={_config.Loadouts.Ct.KnifePresets.Count}, t_knives={_config.Loadouts.T.KnifePresets.Count}, ct_guns={_config.Loadouts.Ct.GunPresets.Count}, t_guns={_config.Loadouts.T.GunPresets.Count}, music={_config.MusicKitId}{restart}");
     }
 
     private void OnStatusCommand(CCSPlayerController? player, CommandInfo command)
     {
-        command.ReplyToCommand($"[PlayerKnifeCustomizer] enabled={_config.Enabled}, stickers={StickerReleaseEnabled && _config.StickersEnabled}, signature={(_setAttrByName == null ? "missing" : "loaded")}, ct_knives={_config.Loadouts.Ct.KnifePresets.Count}, t_knives={_config.Loadouts.T.KnifePresets.Count}, ct_guns={_config.Loadouts.Ct.GunPresets.Count}, t_guns={_config.Loadouts.T.GunPresets.Count}, music={_config.MusicKitId}, catalog={_skinCatalog.Values.Sum(skins => skins.Count)}, sticker_catalog={_validStickers.Count}, active_generations={_applyTracker.ActiveCount}, schedules={_applyTracker.Schedules}, phase_completions={_applyTracker.PhaseCompletions}, retry_exhaustions={_applyTracker.RetryExhaustions}, context_invalidations={_applyTracker.ContextInvalidations}");
+        command.ReplyToCommand($"[PlayerKnifeCustomizer] enabled={_config.Enabled}, stickers={DecorationReleaseEnabled && _config.StickersEnabled}, charms={DecorationReleaseEnabled && _config.CharmsEnabled}, agents={DecorationReleaseEnabled && _config.AgentsEnabled}, signature={(_setAttrByName == null ? "missing" : "loaded")}, ct_knives={_config.Loadouts.Ct.KnifePresets.Count}, t_knives={_config.Loadouts.T.KnifePresets.Count}, ct_guns={_config.Loadouts.Ct.GunPresets.Count}, t_guns={_config.Loadouts.T.GunPresets.Count}, music={_config.MusicKitId}, catalog={_skinCatalog.Values.Sum(skins => skins.Count)}, sticker_catalog={_validStickers.Count}, charm_catalog={_validCharms.Count}, agent_catalog={_agentModels.Values.Sum(models => models.Count)}, active_generations={_applyTracker.ActiveCount}, schedules={_applyTracker.Schedules}, phase_completions={_applyTracker.PhaseCompletions}, retry_exhaustions={_applyTracker.RetryExhaustions}, context_invalidations={_applyTracker.ContextInvalidations}");
     }
 
     private void LogApplyError(string operation, Exception ex)
@@ -947,7 +1190,8 @@ public enum CosmeticApplyPhase
     Gloves = 2,
     Guns = 4,
     Music = 8,
-    All = Knife | Gloves | Guns | Music,
+    Agent = 16,
+    All = Knife | Gloves | Guns | Music | Agent,
 }
 
 public sealed class ApplyGenerationTracker
@@ -1100,6 +1344,9 @@ public sealed class TeamLoadoutCollection
 
 public sealed class TeamLoadout
 {
+    [JsonPropertyName("agent_model")]
+    public string AgentModel { get; set; } = string.Empty;
+
     [JsonPropertyName("default_knife_defindex")]
     public ushort DefaultKnifeDefIndex { get; set; }
 
@@ -1114,6 +1361,7 @@ public sealed class TeamLoadout
 
     public TeamLoadout Clone() => new()
     {
+        AgentModel = AgentModel,
         DefaultKnifeDefIndex = DefaultKnifeDefIndex,
         KnifePresets = KnifePresets.ToDictionary(pair => pair.Key, pair => pair.Value.Clone()),
         Glove = Glove.Clone(),
@@ -1122,6 +1370,7 @@ public sealed class TeamLoadout
 
     public void Normalize()
     {
+        AgentModel ??= string.Empty;
         KnifePresets ??= new Dictionary<ushort, KnifePreset>();
         GunPresets ??= new Dictionary<ushort, KnifePreset>();
         Glove ??= new GlovePreset();
@@ -1134,7 +1383,7 @@ public sealed class TeamLoadout
 
 public sealed class KnifeConfig
 {
-    public const int CurrentSchemaVersion = 3;
+    public const int CurrentSchemaVersion = 5;
 
     [JsonPropertyName("schema_version")]
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
@@ -1159,6 +1408,12 @@ public sealed class KnifeConfig
 
     [JsonPropertyName("stickers_enabled")]
     public bool StickersEnabled { get; set; }
+
+    [JsonPropertyName("charms_enabled")]
+    public bool CharmsEnabled { get; set; }
+
+    [JsonPropertyName("agents_enabled")]
+    public bool AgentsEnabled { get; set; }
 
     public static KnifeConfig FromLegacy(LegacyKnifeConfig legacy)
     {
@@ -1221,9 +1476,9 @@ public sealed class KnifeConfig
             if (!linked || WeaponPresetResolver.GetAvailability(defIndex) != WeaponAvailability.Shared) continue;
             bool hasCt = Loadouts.Ct.GunPresets.TryGetValue(defIndex, out var ct);
             bool hasT = Loadouts.T.GunPresets.TryGetValue(defIndex, out var t);
-            if (hasCt && !hasT) Loadouts.T.GunPresets[defIndex] = ct!.Clone();
-            else if (!hasCt && hasT) Loadouts.Ct.GunPresets[defIndex] = t!.Clone();
-            else if (hasCt && hasT && !ct!.ValueEquals(t!)) Loadouts.T.GunPresets[defIndex] = ct.Clone();
+            if (hasCt && !hasT) Loadouts.T.GunPresets[defIndex] = ct!.CloneWithoutDecorations();
+            else if (!hasCt && hasT) Loadouts.Ct.GunPresets[defIndex] = t!.CloneWithoutDecorations();
+            else if (hasCt && hasT && !ct!.BaseValueEquals(t!)) t!.CopyBaseFrom(ct);
         }
     }
 }
@@ -1352,20 +1607,47 @@ public sealed class KnifePreset
     [JsonPropertyName("stickers")]
     public List<StickerPreset> Stickers { get; set; } = new();
 
+    [JsonPropertyName("charm")]
+    public CharmPreset? Charm { get; set; }
+
     public KnifePreset Clone() => new()
     {
         Paint = Paint, Seed = Seed, Wear = Wear, NameTag = NameTag,
         StatTrakEnabled = StatTrakEnabled, StatTrakCount = StatTrakCount,
         SouvenirEnabled = SouvenirEnabled,
         Stickers = (Stickers ?? []).Select(sticker => sticker.Clone()).ToList(),
+        Charm = Charm?.Clone(),
     };
 
-    public bool ValueEquals(KnifePreset other) => Paint == other.Paint && Seed == other.Seed
+    public KnifePreset CloneWithoutDecorations() => new()
+    {
+        Paint = Paint, Seed = Seed, Wear = Wear, NameTag = NameTag,
+        StatTrakEnabled = StatTrakEnabled, StatTrakCount = StatTrakCount,
+        SouvenirEnabled = SouvenirEnabled,
+        Stickers = [],
+        Charm = null,
+    };
+
+    public bool BaseValueEquals(KnifePreset other) => Paint == other.Paint && Seed == other.Seed
         && Wear.Equals(other.Wear) && NameTag == other.NameTag
         && StatTrakEnabled == other.StatTrakEnabled && StatTrakCount == other.StatTrakCount
-        && SouvenirEnabled == other.SouvenirEnabled
+        && SouvenirEnabled == other.SouvenirEnabled;
+
+    public void CopyBaseFrom(KnifePreset source)
+    {
+        Paint = source.Paint;
+        Seed = source.Seed;
+        Wear = source.Wear;
+        NameTag = source.NameTag;
+        StatTrakEnabled = source.StatTrakEnabled;
+        StatTrakCount = source.StatTrakCount;
+        SouvenirEnabled = source.SouvenirEnabled;
+    }
+
+    public bool ValueEquals(KnifePreset other) => BaseValueEquals(other)
         && (Stickers ?? []).Count == (other.Stickers ?? []).Count
-        && (Stickers ?? []).Zip(other.Stickers ?? []).All(pair => pair.First.ValueEquals(pair.Second));
+        && (Stickers ?? []).Zip(other.Stickers ?? []).All(pair => pair.First.ValueEquals(pair.Second))
+        && (Charm == null ? other.Charm == null : other.Charm != null && Charm.ValueEquals(other.Charm));
 
     public void Normalize()
     {
@@ -1383,6 +1665,7 @@ public sealed class StickerPreset
 {
     [JsonPropertyName("slot")] public byte Slot { get; set; }
     [JsonPropertyName("id")] public uint Id { get; set; }
+    [JsonPropertyName("schema")] public uint Schema { get; set; }
     [JsonPropertyName("wear")] public float Wear { get; set; }
     [JsonPropertyName("scale")] public float Scale { get; set; } = 1f;
     [JsonPropertyName("rotation")] public float Rotation { get; set; }
@@ -1394,6 +1677,7 @@ public sealed class StickerPreset
     {
         Slot = Slot,
         Id = Id,
+        Schema = Schema,
         Wear = Wear,
         Scale = Scale,
         Rotation = Rotation,
@@ -1402,10 +1686,21 @@ public sealed class StickerPreset
         CustomPosition = CustomPosition,
     };
 
-    public bool ValueEquals(StickerPreset other) => Slot == other.Slot && Id == other.Id
+    public bool ValueEquals(StickerPreset other) => Slot == other.Slot && Id == other.Id && Schema == other.Schema
         && Wear.Equals(other.Wear) && Scale.Equals(other.Scale) && Rotation.Equals(other.Rotation)
         && OffsetX.Equals(other.OffsetX) && OffsetY.Equals(other.OffsetY)
         && CustomPosition == other.CustomPosition;
+}
+
+public sealed class CharmPreset
+{
+    [JsonPropertyName("id")] public uint Id { get; set; }
+    [JsonPropertyName("placement_id")] public uint PlacementId { get; set; }
+    [JsonPropertyName("seed")] public int Seed { get; set; }
+
+    public CharmPreset Clone() => new() { Id = Id, PlacementId = PlacementId, Seed = Seed };
+    public bool ValueEquals(CharmPreset other) => Id == other.Id
+        && PlacementId == other.PlacementId && Seed == other.Seed;
 }
 
 public sealed class WeaponSkinEntry

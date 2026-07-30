@@ -42,13 +42,13 @@ Require(WeaponPresetResolver.TryResolveGunPreset(config, 9, CosmeticTeam.T, out 
     "A linked shared weapon must fall back to the configured side.");
 
 var validStickerIds = new HashSet<uint> { 1, 2, 3, 4, 5, 6 };
-var validStickerWeaponIds = new HashSet<ushort> { 7, 9 };
+var stickerSchemaCounts = new Dictionary<ushort, uint> { [7] = 4, [9] = 5 };
 var customSticker = new StickerPreset
 {
-    Slot = 0, Id = 1, Wear = 0.25f, Scale = 1.2f, Rotation = 45f,
+    Slot = 0, Id = 1, Schema = 2, Wear = 0.25f, Scale = 1.2f, Rotation = 45f,
     OffsetX = -0.4f, OffsetY = 0.7f, CustomPosition = true,
 };
-Require(StickerAttributePlanner.TryBuild(7, true, [customSticker], validStickerIds, validStickerWeaponIds, out var attributes, out var stickerError),
+Require(StickerAttributePlanner.TryBuild(7, true, [customSticker], validStickerIds, stickerSchemaCounts, out var attributes, out var stickerError),
     $"A valid sticker plan must build: {stickerError}");
 Require(attributes.Select(attribute => attribute.Name).SequenceEqual([
     "sticker slot 0 id", "sticker slot 0 schema", "sticker slot 0 offset x", "sticker slot 0 offset y",
@@ -56,49 +56,115 @@ Require(attributes.Select(attribute => attribute.Name).SequenceEqual([
 ]), "Sticker attributes must use the exact CS2 attribute names and deterministic order.");
 Require(unchecked((uint)BitConverter.SingleToInt32Bits(attributes[0].Value)) == customSticker.Id,
     "Sticker IDs must be encoded by reinterpreting uint bits as float bits.");
-Require(attributes[1].Value == 0f && attributes[2].Value == customSticker.OffsetX && attributes[3].Value == customSticker.OffsetY,
-    "Custom positions must emit schema zero and bounded X/Y offsets.");
+Require(unchecked((uint)BitConverter.SingleToInt32Bits(attributes[1].Value)) == customSticker.Schema
+    && attributes[2].Value == customSticker.OffsetX && attributes[3].Value == customSticker.OffsetY,
+    "Custom positions must preserve the selected weapon schema and bounded X/Y offsets.");
 
 customSticker.CustomPosition = false;
-Require(StickerAttributePlanner.TryBuild(7, true, [customSticker], validStickerIds, validStickerWeaponIds, out attributes, out _)
-    && attributes.All(attribute => !attribute.Name.Contains("schema") && !attribute.Name.Contains("offset")),
-    "Default sticker placement must not emit schema or offset attributes.");
-Require(StickerAttributePlanner.TryBuild(7, false, [customSticker], validStickerIds, validStickerWeaponIds, out attributes, out _)
+Require(StickerAttributePlanner.TryBuild(7, true, [customSticker], validStickerIds, stickerSchemaCounts, out attributes, out _)
+    && attributes.Any(attribute => attribute.Name.EndsWith("schema"))
+    && attributes.All(attribute => !attribute.Name.Contains("offset")),
+    "Default sticker placement must emit its schema without custom offsets.");
+Require(StickerAttributePlanner.TryBuild(7, false, [customSticker], validStickerIds, stickerSchemaCounts, out attributes, out _)
     && attributes.Count == 0,
     "Disabling the feature must preserve configuration without emitting sticker attributes.");
-Require(!StickerAttributePlanner.TryBuild(515, false, [customSticker], validStickerIds, validStickerWeaponIds, out _, out stickerError)
+Require(!StickerAttributePlanner.TryBuild(515, false, [customSticker], validStickerIds, stickerSchemaCounts, out _, out stickerError)
     && stickerError.Contains("knife"),
     "Knife stickers must be rejected even while sticker application is disabled.");
 Require(!StickerAttributePlanner.TryBuild(7, true,
         Enumerable.Range(0, 6).Select(index => new StickerPreset { Slot = (byte)index, Id = (uint)(index + 1), Scale = 1f }),
-        validStickerIds, validStickerWeaponIds, out _, out stickerError) && stickerError.Contains("more than five"),
+        validStickerIds, stickerSchemaCounts, out _, out stickerError) && stickerError.Contains("more than five"),
     "A weapon must reject more than five stickers.");
 Require(!StickerAttributePlanner.TryBuild(7, true,
         [new StickerPreset { Slot = 0, Id = 1, Scale = 1f }, new StickerPreset { Slot = 0, Id = 2, Scale = 1f }],
-        validStickerIds, validStickerWeaponIds, out _, out stickerError) && stickerError.Contains("unique"),
+        validStickerIds, stickerSchemaCounts, out _, out stickerError) && stickerError.Contains("unique"),
     "Duplicate sticker slots must be rejected.");
 Require(!StickerAttributePlanner.TryBuild(7, true,
-        [new StickerPreset { Slot = 0, Id = 999, Scale = 1f }], validStickerIds, validStickerWeaponIds, out _, out stickerError)
+        [new StickerPreset { Slot = 0, Id = 999, Scale = 1f }], validStickerIds, stickerSchemaCounts, out _, out stickerError)
     && stickerError.Contains("unknown"),
     "Unknown sticker IDs must be rejected before native writes.");
 Require(!StickerAttributePlanner.TryBuild(7, true,
-        [new StickerPreset { Slot = 0, Id = 1, Scale = float.NaN }], validStickerIds, validStickerWeaponIds, out _, out stickerError)
+        [new StickerPreset { Slot = 0, Id = 1, Scale = float.NaN }], validStickerIds, stickerSchemaCounts, out _, out stickerError)
     && stickerError.Contains("range"),
     "Non-finite sticker values must be rejected before native writes.");
-Require(!StickerAttributePlanner.TryBuild(42, true, [customSticker], validStickerIds, validStickerWeaponIds, out _, out stickerError)
+Require(!StickerAttributePlanner.TryBuild(42, true, [customSticker], validStickerIds, stickerSchemaCounts, out _, out stickerError)
     && stickerError.Contains("not supported"),
     "Weapons outside the fixed capability catalog must be rejected before native writes.");
+customSticker.Schema = 4;
+Require(!StickerAttributePlanner.TryBuild(7, true, [customSticker], validStickerIds, stickerSchemaCounts, out _, out stickerError)
+    && stickerError.Contains("schema"),
+    "Sticker schemas outside the selected weapon catalog must be rejected before native writes.");
+customSticker.Schema = 2;
+
+var validCharmIds = new HashSet<uint> { 37, 38 };
+var charmPlacements = new Dictionary<ushort, IReadOnlyDictionary<uint, CharmNativePlacement>>
+{
+    [7] = new Dictionary<uint, CharmNativePlacement>
+    {
+        [3] = new CharmNativePlacement(3, 2.1f, 0.43f, 3.43f),
+    },
+};
+var charm = new CharmPreset { Id = 37, PlacementId = 3, Seed = 12345 };
+Require(CharmAttributePlanner.TryBuild(7, true, charm, validCharmIds, charmPlacements, out var charmAttributes, out var charmError)
+    && charmAttributes.Select(attribute => attribute.Name).SequenceEqual([
+        "keychain slot 0 id", "keychain slot 0 seed", "keychain slot 0 offset x",
+        "keychain slot 0 offset y", "keychain slot 0 offset z",
+    ]), $"A valid charm plan must resolve catalog-owned XYZ attributes: {charmError}");
+Require(!CharmAttributePlanner.TryBuild(7, true, new CharmPreset { Id = 37, PlacementId = 99 }, validCharmIds, charmPlacements, out _, out charmError)
+    && charmError.Contains("placement"), "Unknown charm placements must be rejected before native writes.");
+Require(!CharmAttributePlanner.TryBuild(515, true, charm, validCharmIds, charmPlacements, out _, out charmError)
+    && charmError.Contains("knife"), "Knife charms must be rejected before native writes.");
+Require(DecorationConfigPolicy.CanPreserveStickers(
+        7, true, [customSticker], new HashSet<uint>(), new Dictionary<ushort, uint>()),
+    "A temporarily missing catalog must not erase structurally valid saved stickers.");
+Require(DecorationConfigPolicy.CanPreserveCharm(
+        7, true, charm, new HashSet<uint>(),
+        new Dictionary<ushort, IReadOnlyDictionary<uint, CharmNativePlacement>>()),
+    "A temporarily missing catalog must not erase a structurally valid saved charm.");
+Require(!DecorationConfigPolicy.CanPreserveStickers(
+        7, true, [new StickerPreset { Slot = 0, Id = 1, Scale = float.NaN }],
+        new HashSet<uint>(), new Dictionary<ushort, uint>()),
+    "Catalog fallback must still reject invalid sticker ranges.");
+Require(!DecorationConfigPolicy.CanPreserveCharm(
+        7, true, new CharmPreset { Id = 37, PlacementId = 3, Seed = -1 }, new HashSet<uint>(),
+        new Dictionary<ushort, IReadOnlyDictionary<uint, CharmNativePlacement>>()),
+    "Catalog fallback must still reject invalid charm ranges.");
+const string ctAgent = "agents\\models\\ctm_fbi\\ctm_fbi.vmdl";
+const string tAgent = "agents\\models\\tm_phoenix\\tm_phoenix.vmdl";
+var agentModels = new Dictionary<CosmeticTeam, HashSet<string>>
+{
+    [CosmeticTeam.Ct] = new(StringComparer.OrdinalIgnoreCase) { ctAgent },
+    [CosmeticTeam.T] = new(StringComparer.OrdinalIgnoreCase) { tAgent },
+};
+Require(AgentModelPolicy.IsAllowed(CosmeticTeam.Ct, ctAgent, agentModels),
+    "A catalog-owned CT agent model must be accepted for CT.");
+Require(!AgentModelPolicy.IsAllowed(CosmeticTeam.T, ctAgent, agentModels),
+    "A CT agent model must never be accepted for T.");
+Require(!AgentModelPolicy.IsAllowed(CosmeticTeam.Ct, "agents\\models\\ctm_unknown\\escape.vmdl", agentModels),
+    "An unknown agent model must be rejected before SetModel.");
+Require(AgentModelPolicy.IsAllowed(CosmeticTeam.Ct, string.Empty, agentModels),
+    "An empty agent model must preserve the game default.");
 Require(StickerFailurePolicy.ShouldRestoreBaseSkin(false) && !StickerFailurePolicy.ShouldRestoreBaseSkin(true),
     "A failed sticker plan or native write must restore the ordinary gun skin attributes.");
 
 var linkedStickerConfig = new KnifeConfig();
 linkedStickerConfig.Loadouts.Ct.GunPresets[9] = Preset(344);
 linkedStickerConfig.Loadouts.Ct.GunPresets[9].Stickers = [customSticker.Clone()];
+linkedStickerConfig.Loadouts.Ct.GunPresets[9].Charm = charm.Clone();
 linkedStickerConfig.SharedWeaponLinks[9] = true;
 linkedStickerConfig.Normalize();
-Require(linkedStickerConfig.Loadouts.T.GunPresets[9].ValueEquals(linkedStickerConfig.Loadouts.Ct.GunPresets[9])
-    && linkedStickerConfig.Loadouts.T.GunPresets[9].Stickers[0].Id == 1,
-    "Shared CT/T normalization must copy the complete preset including sticker order and values.");
+Require(linkedStickerConfig.Loadouts.T.GunPresets[9].BaseValueEquals(linkedStickerConfig.Loadouts.Ct.GunPresets[9])
+    && linkedStickerConfig.Loadouts.T.GunPresets[9].Stickers.Count == 0
+    && linkedStickerConfig.Loadouts.T.GunPresets[9].Charm == null,
+    "Shared CT/T normalization must copy only the base skin into a missing team preset.");
+linkedStickerConfig.Loadouts.T.GunPresets[9].Paint = 279;
+linkedStickerConfig.Loadouts.T.GunPresets[9].Stickers = [new StickerPreset { Slot = 1, Id = 2, Schema = 1, Scale = 1f }];
+linkedStickerConfig.Loadouts.T.GunPresets[9].Charm = new CharmPreset { Id = 38, PlacementId = charm.PlacementId, Seed = 7 };
+linkedStickerConfig.Normalize();
+Require(linkedStickerConfig.Loadouts.T.GunPresets[9].Paint == 344
+    && linkedStickerConfig.Loadouts.T.GunPresets[9].Stickers.Single().Id == 2
+    && linkedStickerConfig.Loadouts.T.GunPresets[9].Charm?.Id == 38,
+    "Shared CT/T normalization must synchronize base skin fields without replacing team decorations.");
 
 var tracker = new ApplyGenerationTracker();
 nint playerHandle = (nint)0x1000;
@@ -110,8 +176,9 @@ Require(!tracker.IsCurrent(playerHandle, initialSpawn),
 Require(tracker.IsPending(playerHandle, firstGive, CosmeticApplyPhase.Knife) &&
         tracker.IsPending(playerHandle, firstGive, CosmeticApplyPhase.Gloves) &&
         tracker.IsPending(playerHandle, firstGive, CosmeticApplyPhase.Guns) &&
-        tracker.IsPending(playerHandle, firstGive, CosmeticApplyPhase.Music),
-    "A GiveNamedItem event must carry every unfinished spawn phase into the new generation.");
+        tracker.IsPending(playerHandle, firstGive, CosmeticApplyPhase.Music) &&
+        tracker.IsPending(playerHandle, firstGive, CosmeticApplyPhase.Agent),
+    "A GiveNamedItem event must carry every unfinished spawn phase, including agents, into the new generation.");
 
 Require(tracker.Complete(playerHandle, firstGive, CosmeticApplyPhase.Music),
     "The current generation must complete a phase before a pickup storm.");
@@ -122,8 +189,9 @@ Require(!tracker.IsPending(playerHandle, pickupStorm, CosmeticApplyPhase.Music),
     "A completed phase must not be reintroduced by later gun-only events.");
 Require(tracker.IsPending(playerHandle, pickupStorm, CosmeticApplyPhase.Knife) &&
         tracker.IsPending(playerHandle, pickupStorm, CosmeticApplyPhase.Gloves) &&
-        tracker.IsPending(playerHandle, pickupStorm, CosmeticApplyPhase.Guns),
-    "A GiveNamedItem storm must preserve unfinished knife, glove, and gun phases.");
+        tracker.IsPending(playerHandle, pickupStorm, CosmeticApplyPhase.Guns) &&
+        tracker.IsPending(playerHandle, pickupStorm, CosmeticApplyPhase.Agent),
+    "A GiveNamedItem storm must preserve unfinished knife, glove, gun, and agent phases.");
 Require(tracker.MarkRetryExhausted(playerHandle, pickupStorm),
     "The final bounded attempt must record unfinished phases once.");
 Require(!tracker.MarkRetryExhausted(playerHandle, pickupStorm) && tracker.RetryExhaustions == 1,
