@@ -19,6 +19,7 @@
     <None Update="weapon_skins.json" CopyToOutputDirectory="PreserveNewest" />
     <None Update="sticker_ids.json" CopyToOutputDirectory="PreserveNewest" />
     <None Update="sticker_weapon_ids.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="player_cosmetic_catalog.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
