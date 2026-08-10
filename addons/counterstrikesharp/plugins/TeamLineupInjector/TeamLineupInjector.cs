@@ -29,6 +29,7 @@ public sealed class TeamLineupInjectorPlugin : BasePlugin
     {
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
         RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam);
+        RegisterEventHandler<EventCsWinPanelMatch>(OnWinPanelMatch);
         Logger.LogInformation("[TeamLineup] Plugin loaded");
     }
 
@@ -93,6 +94,24 @@ public sealed class TeamLineupInjectorPlugin : BasePlugin
                 return;
             }
             ExecuteLineup(current, team == (byte)CsTeam.CounterTerrorist);
+        });
+
+        return HookResult.Continue;
+    }
+
+    private HookResult OnWinPanelMatch(EventCsWinPanelMatch @event, GameEventInfo info)
+    {
+        if (!_injected) return HookResult.Continue;
+
+        AddTimer(0.5f, () =>
+        {
+            Server.ExecuteCommand("bot_quota_mode fill");
+            Server.ExecuteCommand("bot_quota 10");
+            Server.ExecuteCommand("mp_teamname_1 \"\"");
+            Server.ExecuteCommand("mp_teamname_2 \"\"");
+            Server.ExecuteCommand("mp_teamlogo_1 \"\"");
+            Server.ExecuteCommand("mp_teamlogo_2 \"\"");
+            Logger.LogInformation("[TeamLineup] Match ended, restored default server state");
         });
 
         return HookResult.Continue;
