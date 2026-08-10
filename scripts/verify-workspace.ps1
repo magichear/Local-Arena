@@ -413,8 +413,7 @@ catch {
 $teamLineupInjector = Get-Content -LiteralPath (Join-Path $repo "addons/counterstrikesharp/plugins/TeamLineupInjector/TeamLineupInjector.cs") -Raw
 if ($teamLineupInjector -notmatch 'MatchSessionActive\(\)' -or
     $teamLineupInjector -notmatch 'config is not \{ Enabled: true \}' -or
-    $teamLineupInjector -notmatch '"bot_kick"' -or
-    $teamLineupInjector -notmatch 'RestoreBotQuota\(\)') {
+    $teamLineupInjector -notmatch '"bot_kick"') {
     Add-Failure "TeamLineupInjector must check Enabled and MatchSessionActive before bot_kick."
 }
 

@@ -53,7 +53,6 @@ public sealed class TeamLineupInjectorPlugin : BasePlugin
         if (MatchSessionActive())
         {
             Logger.LogInformation("[TeamLineup] Active match session detected, not interfering with the Match roster");
-            ClearTeamIdentity();
             return HookResult.Continue;
         }
 
@@ -61,8 +60,6 @@ public sealed class TeamLineupInjectorPlugin : BasePlugin
         if (config is not { Enabled: true })
         {
             Logger.LogInformation("[TeamLineup] Lineup disabled or config missing, not interfering");
-            ClearTeamIdentity();
-            RestoreBotQuota();
             return HookResult.Continue;
         }
 
@@ -255,22 +252,6 @@ public sealed class TeamLineupInjectorPlugin : BasePlugin
     {
         if (_csgoRoot == null && !TryResolveCsgoRoot()) return false;
         return File.Exists(Path.Combine(_csgoRoot ?? ".", ".csbip", "match-active.json"));
-    }
-
-    private void ClearTeamIdentity()
-    {
-        Server.ExecuteCommand("mp_teamname_1 \"\"");
-        Server.ExecuteCommand("mp_teamname_2 \"\"");
-        Server.ExecuteCommand("mp_teamlogo_1 \"\"");
-        Server.ExecuteCommand("mp_teamlogo_2 \"\"");
-    }
-
-    private void RestoreBotQuota()
-    {
-        Server.ExecuteCommand("bot_quota_mode fill");
-        Server.ExecuteCommand("bot_quota 10");
-        Server.ExecuteCommand("mp_restartgame 1");
-        Logger.LogInformation("[TeamLineup] Restored default bot quota and restarted game");
     }
 
     private string LineupConfigPath()
